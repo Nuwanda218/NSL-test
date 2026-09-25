@@ -15,7 +15,9 @@ def gelu(x):
         Input: Tensor
         Output: Tensor
     """
-    pass
+    #翻译成函数 x³  →  ×0.044715  →  +x  →  ×√(2/π)  →  tanh  →  +1  →  ×x  →  ×0.5
+    return x * 0.5 * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * x ** 3)))
+    
 
 
 def softmax(x):
@@ -24,7 +26,12 @@ def softmax(x):
         Input: Tensor
         Output: Tensor
     """
-    pass
+    #输入一矩阵x（类型为torch.tensor），输出一矩阵y（类型为torch.tensor）
+    #每行减去该行的最大值，再取指数，再除以该行所有元素指数之和
+    x_max = x.max(dim=-1, keepdim=True).values
+    e_x = torch.exp(x - x_max)
+    return e_x / e_x.sum(dim=-1, keepdim=True)
+
 
 
 def layer_norm(x, g_b, eps:float = 1e-5):
@@ -35,9 +42,14 @@ def layer_norm(x, g_b, eps:float = 1e-5):
             g_b: dictionary that load from gpt2 weight. g-gamma and b-bias are the keys
         Output: Tensor
     """
+    #输入矩阵x（类型为torch.tensor），g_b['g']是x的权重，g_b['b']是x的偏置
+    #进行归一化，先求均值，再求方差，再求标准差
+    #稳定每层输入的分布，防止梯度爆炸或梯度消失
     g, b = torch.Tensor(g_b['g']), torch.Tensor(g_b['b'])
+    mean = x.mean(dim=-1, keepdim=True)
+    var = ((x - mean) ** 2).mean(dim=-1, keepdim=True)
+    return (x - mean) / torch.sqrt(var + eps) * g + b
     
-    pass
 
 def linear(x, w_b):  # [m, in], [in, out], [out] -> [m, out]
     """
@@ -47,8 +59,9 @@ def linear(x, w_b):  # [m, in], [in, out], [out] -> [m, out]
             w_b: dictionary that load from gpt2 weight. w-weight and b-bias are the keys
         Output: Tensor
     """
-    w, b = w_b['w'], w_b['b']
-    pass
+    #输入一矩阵x（类型为torch.tensor），w_b['w']是x的权重，w_b['b']是x的偏置
+    w, b = w_b['w'], w_b['b'] #读取权重和偏置 w是权重，b是偏置
+    return x @ w + b
     
 
 def ffn(x, mlp):  # [n_seq, n_embd] -> [n_seq, n_embd]
@@ -60,8 +73,13 @@ def ffn(x, mlp):  # [n_seq, n_embd] -> [n_seq, n_embd]
             mlp: dictionary that load from gpt2 weight. w_b1 and w_b2 are the params of two linear layer
         Output: Tensor
     """
+    # 只带一个隐藏层的神经网络
+    #输入矩阵x c_fc是输入到隐藏层权重，c_proj是隐藏层到输出层的权重
     w_b1, w_b2 = mlp['c_fc'], mlp['c_proj']
-    pass
+    h = linear(x, w_b1) #h是隐藏层，3072维
+    h = gelu(h) 
+    return linear(h, w_b2)  
+    
 
 
 def attention(q, k, v, mask):  # [n_q, d_k], [n_k, d_k], [n_k, d_v], [n_q, n_k] -> [n_q, d_v]
@@ -77,7 +95,14 @@ def attention(q, k, v, mask):  # [n_q, d_k], [n_k, d_k], [n_k, d_v], [n_q, n_k] 
             mlp: dictionary that load from gpt2 weight. w_b1 and w_b2 are the params of two linear layer
         Output: Tensor
     """
-    pass
+    # q是query，k是key，v是value，mask是掩码
+    # 本质是单头注意力，加上了因果mask
+    d_k = k.shape[-1] # d_k是key的维度
+    scores = q @ k.transpose(-1, -2) / math.sqrt(d_k) # scores是注意力得分矩阵
+    scores = scores + mask #加上因果mask
+    weights = softmax(scores) #weights是注意力权重矩阵 softmax把得分转成比例
+    return weights @ v #weights @ v是注意力输出矩阵
+    
 
 def mha(x, attn, n_head):  # [n_seq, n_embd] -> [n_seq, n_embd]
     """
@@ -90,17 +115,19 @@ def mha(x, attn, n_head):  # [n_seq, n_embd] -> [n_seq, n_embd]
         Output: Tensorying multi-head attention and linear transformation, shape [n_seq, n_embd].
     """
     c_attn, c_proj = attn['c_attn'], attn['c_proj']
-    # qkv projection
+    # qkv projection 一次得到qkv三个矩阵的联合体
     x = linear(x, c_attn)  # [n_seq, n_embd] -> [n_seq, 3*n_embd]
-    
-    # Split into qkv
+    #2304维
+
+    # Split into qkv 
     """
         Task: Split the q,k,v matrix from the tensor x
         Notes: [n_seq, 3*n_embd] -> 3 * [n_seq, n_embd]
     """
-    qkv = None # need to modify
+    qkv = x.chunk(3, dim=-1)  # [n_seq, 3*n_embd] -> 3 * [n_seq, n_embd]) 
+    # need to modify 把联合在一起的矩阵拆分成三个矩阵
 
-    # Split into heads
+    # Split into heads 把768维度分成12个头，每头64维度
     qkv_heads = [qkv_part.chunk(n_head, dim=-1) for qkv_part in qkv]  # 3 * [n_seq, n_embd] -> 3 * n_head * [n_seq, n_embd/n_head]
     qkv_heads = list(zip(*qkv_heads))  # [3, n_head, n_seq, n_embd/n_head]
 
@@ -115,9 +142,10 @@ def mha(x, attn, n_head):  # [n_seq, n_embd] -> [n_seq, n_embd]
             | 0    0    0  ...   0  |
         Mask is a tensor whose dimension is [n_seq, n_seq]
     """
-    causal_mask = None # need to modify
-
-    # Perform attention over each head
+    n_seq = x.shape[0] # n_seq是序列长度
+    causal_mask = torch.triu(torch.full((n_seq, n_seq), float('-inf')), diagonal=1) # need to modify 构造因果mask
+     #其实就是一个上三角矩阵，对角线及以下全为0，对角线以上全为-inf
+    # Perform attention over each head 
     out_heads = [attention(q, k, v, causal_mask) for q, k, v in qkv_heads]  # n_head * [n_seq, n_embd/n_head]
     
     # Merge heads
@@ -125,9 +153,9 @@ def mha(x, attn, n_head):  # [n_seq, n_embd] -> [n_seq, n_embd]
         Task: merge multi-heads results
         Notes: n_head * [n_seq, n_embd/n_head] --> [n_seq, n_embd]
     """
-    x = None # need to modify
+    x = torch.cat(out_heads, dim=-1) # need to modify 合并多头注意力
     
-    # Out projection
+    # Out projection 再对多头注意力的结果进行一次融合
     x = linear(x, c_proj)  # [n_seq, n_embd] -> [n_seq, n_embd]
     
     return x
