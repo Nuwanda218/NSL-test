@@ -134,41 +134,56 @@ def mha(x, attn, n_head):  # [n_seq, n_embd] -> [n_seq, n_embd]
 
 
 def transformer_block(x, block, n_head):  # [n_seq, n_embd] -> [n_seq, n_embd]
+    #在gpt2中循环被调用12次
+    #block是gpt2的12个transformer block的参数
+    #n_head是多头注意力的头数
     mlp, attn, ln_1, ln_2 = block['mlp'], block['attn'], block['ln_1'], block['ln_2']
+    #解析出本层的参数
+    #ln_1, ln_2是两个layer norm的参数
     
-    # multi-head causal self attention
+    # multi-head causal self attention 残差连接
     x = x + mha(layer_norm(x, ln_1), attn, n_head=n_head)  # [n_seq, n_embd] -> [n_seq, n_embd]
 
-    # position-wise feed forward network
+    # position-wise feed forward network 残差链接
     x = x + ffn(layer_norm(x, ln_2), mlp)  # [n_seq, n_embd] -> [n_seq, n_embd]
 
+    #这里的归一化都是在函数入口做的，所以产出没有进行归一化操作
     return x
 
 
-def gpt2(inputs, params, n_head):  # [n_seq] -> [n_seq, n_vocab]
+def gpt2(inputs, params, n_head):  # [n_seq] -> [n_seq, n_vocab] 被generate调用
+    #输入整理完毕的token ID序列、模型权重、多头注意力的头数
     wte, wpe, blocks, ln_f = params['wte'], params['wpe'], params['blocks'], params['ln_f']
     # token + positional embeddings
     x = wte[inputs] + wpe[range(len(inputs))]  # [n_seq] -> [n_seq, n_embd]
+    #进行embedding的线性变换（500267*768 =500267*12*64） + 位置编码（1024*768限定长度是1024）
     
-    x = torch.Tensor(x)
+    
+    x = torch.Tensor(x) #numpy 转 torch
     # forward pass through n_layer transformer blocks
-    for block in blocks:
+    for block in blocks: #十二层decoder layer
         x = transformer_block(x, block, n_head=n_head)  # [n_seq, n_embd] -> [n_seq, n_embd]
 
     # projection to vocab
-    x = layer_norm(x, ln_f)  # [n_seq, n_embd] -> [n_seq, n_embd]
-    return x @ wte.T  # [n_seq, n_embd] -> [n_seq, n_vocab]
+    x = layer_norm(x, ln_f)  # [n_seq, n_embd] -> [n_seq, n_embd] 层间归一化
+    return x @ wte.T  # [n_seq, n_embd] -> [n_seq, n_vocab] 用来做输出打分，使用wte的转置矩阵作为权重，属于一个逆向过程
 
 
-def generate(inputs, params, n_head, n_tokens_to_generate):
+def generate(inputs, params, n_head, n_tokens_to_generate): # [n_seq] -> [n_tokens_to_generate]真实的自回归 decoding
+    #输入inputs是经过处理后的token ID序列、全部权重、多头数、生成token数
     from tqdm import tqdm
 
     for _ in tqdm(range(n_tokens_to_generate), "generating"):  # auto-regressive decode loop
-        logits = gpt2(inputs, params, n_head=n_head)  # model forward pass
-        next_id = np.argmax(logits[-1])  # greedy sampling
-        inputs.append(int(next_id))  # append prediction to input
+        logits = gpt2(inputs, params, n_head=n_head)  # model forward pass 每个循环进行一次前向传播
+        #这里每次都进行全部序列的前向传播，还不存在KV缓存
+        
+        next_id = np.argmax(logits[-1])  # greedy sampling 选择概率最大的token ID 贪心选择
+        
+        #由于是贪心选择，只看最大值，不用进行softmax，因为softmax只影响概率，不影响最大值
+        
+        inputs.append(int(next_id))  # append prediction to input 把预测的token ID添加到输入序列中
 
-    return inputs[len(inputs) - n_tokens_to_generate :]  # only return generated ids
+    return inputs[len(inputs) - n_tokens_to_generate :]  # only return generated ids 只返回最新生成的token ID序列
 
 def greedy_speculative_generate(inputs, draft_params, target_params, hparams_draft, hparams_target, n_tokens_to_generate, K):
     
@@ -198,21 +213,25 @@ def greedy_speculative_generate(inputs, draft_params, target_params, hparams_dra
 def main(prompt: str, n_tokens_to_generate: int = 5, model_size: str = "124M", models_dir: str = "models"):
     from utils import load_encoder_hparams_and_params
 
+    #1.装载函数
     # load encoder, hparams, and params from the released open-ai gpt-2 files
     encoder, hparams, params = load_encoder_hparams_and_params(model_size, models_dir)
 
+    #2.对文本执行编码
     # encode the input string using the BPE tokenizer
     input_ids = encoder.encode(prompt)
 
     # make sure we are not surpassing the max sequence length of our model
     assert len(input_ids) + n_tokens_to_generate < hparams["n_ctx"]
 
+    #3.真正的生成过程
     # generate output ids
     start = time.time()
     output_ids = generate(input_ids, params, hparams["n_head"], n_tokens_to_generate)
     end = time.time()
     print(f"Time taken to generate {n_tokens_to_generate} tokens: {end - start:.2f}s")
 
+    #4.解码输出文本
     # decode the ids back into a string
     output_text = encoder.decode(output_ids)
     return output_text
